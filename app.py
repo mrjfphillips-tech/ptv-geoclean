@@ -357,6 +357,14 @@ if uploaded_file:
                     cc = clean(str(row.get(country_code_col, '')) if country_code_col and country_code_col in df.columns else '')
                     neighborhood_val = clean(str(row.get(_neighborhood_col, '')) if _neighborhood_col and _neighborhood_col in df.columns else '')
 
+                    # PRIORITY: If street has a value, use it as the geocoding address
+                    # "Location Name" is often a business name, not a geocodable address
+                    if street_val and addr and street_val != addr:
+                        # Street is the real address; addr is likely a location/business name
+                        # Use street for geocoding
+                        addr = street_val
+                        street_val = ''  # Don't double-pass it
+
                     # Smart split neighborhood
                     if neighborhood_val:
                         split = split_neighborhood_postal(neighborhood_val, cc or country_val[:2] if country_val else '')
