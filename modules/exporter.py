@@ -152,6 +152,18 @@ def results_to_optiflow_dataframe(results: List[Dict],
         lat = r.get('latitude', 0.0)
         lon = r.get('longitude', 0.0)
 
+        # If geocoding produced 0,0 but original had coordinates, use original
+        if lat == 0.0 or lon == 0.0:
+            existing_lat = r.get('existing_lat', 0.0)
+            existing_lon = r.get('existing_lon', 0.0)
+            try:
+                if existing_lat and float(existing_lat) != 0.0:
+                    lat = float(existing_lat)
+                if existing_lon and float(existing_lon) != 0.0:
+                    lon = float(existing_lon)
+            except (ValueError, TypeError):
+                pass
+
         # For required fields: use original if available, else geocoded, else default
         orig_svc = _find_original_value(original_row, svc_patterns)
         orig_vol = _find_original_value(original_row, vol_patterns)
@@ -168,7 +180,14 @@ def results_to_optiflow_dataframe(results: List[Dict],
         row['volume'] = orig_vol or volume or '1'
         row['timewindows day 1'] = orig_tw or timewindow or '08:00 - 18:00'
 
-        # Add geocoded coordinates
+        # Add geocoded coordinates (override any original lat/lon variants)
+        # Remove case-variant original lat/lon columns that might conflict
+        for key in list(row.keys()):
+            key_lower = key.lower().strip()
+            if key_lower in ('latitude', 'lat', 'longitude', 'lon', 'lng', 'long', 'y', 'x'):
+                if key not in ('latitude', 'longitude'):
+                    del row[key]
+
         if lat != 0.0 and lon != 0.0:
             row['latitude'] = lat
             row['longitude'] = lon
