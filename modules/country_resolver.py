@@ -230,7 +230,7 @@ def resolve_country_code(country_value: str) -> Optional[str]:
     
     # Try without accents (simple ASCII folding)
     ascii_text = normalized
-    accent_map = str.maketrans('áàâãäéèêëíìîïóòôõöúùûüñçý', 'aaaaaeeeeiiiioooooouuuuncy')
+    accent_map = str.maketrans('áàâãäéèêëíìîïóòôõöúùûüñçý', 'aaaaaeeeeiiiiooooouuuuncy')
     ascii_text = normalized.translate(accent_map)
     if ascii_text in COUNTRY_MAP:
         return COUNTRY_MAP[ascii_text]
