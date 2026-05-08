@@ -14,10 +14,16 @@ Steps per row:
 from typing import Dict, List, Optional
 from .address_parser import parse_address
 from .geocoder import geocode_address, geocode_fields, GeocodingError
+from .fallback_geocoder import geocode_with_fallbacks
 from .reverse_geocoder import reverse_geocode, ReverseGeocodingError
 from .entrance_finder import find_entrance
 from .confidence import score_result, determine_output_strategy
 from .country_logic import apply_country_adjustments, validate_postal_code
+from .address_normalizer import normalize_address, extract_postal_code, build_geocoding_query, assess_optiflow_readiness, split_neighborhood_postal
+from .cache import geocode_cache
+from .address_cleaner import clean_address, generate_retry_variants, detect_country_from_address
+from .phone_detector import detect_country_from_phone
+from .country_resolver import resolve_country_code
 
 
 def process_row(
@@ -28,11 +34,21 @@ def process_row(
     postal_code: str = '',
     country: str = '',
     country_code: str = '',
+    phone: str = '',
 ) -> Dict:
     """
-    Process a single address row through the full pipeline.
+    Process a single address row through the pipeline.
+    
+    Smart fill logic: each geocoder fills what it can. Subsequent services
+    are ONLY called for fields that are still blank. If PTV returns everything,
+    no other services are called.
 
-    Accepts either a full address string OR separate fields.
+    Features:
+    - Address pre-cleaning (fix typos, remove noise)
+    - Result caching (identical addresses only geocode once)
+    - Country detection from phone numbers and address patterns
+    - Smart retry with simplified address variants
+    - Progressive field filling (only call APIs for missing data)
 
     Returns:
         Complete result dictionary with all geocoding outputs and confidence.
@@ -45,72 +61,323 @@ def process_row(
     if not address or not address.strip():
         return _empty_result(address)
 
+    # ─── Pre-processing: Clean address and detect country ──────────────────
+    address = clean_address(address)
+
+    # Detect country from phone number if not provided
+    if not country_code and phone:
+        phone_info = detect_country_from_phone(phone)
+        if phone_info['country_code'] and phone_info['confidence'] in ('high', 'low'):
+            country_code = phone_info['country_code']
+
+    # Detect country from address content if still not provided
+    if not country_code and not country:
+        inferred_country = detect_country_from_address(address)
+        if inferred_country:
+            country_code = inferred_country
+
+    # ─── Check cache first ─────────────────────────────────────────────────
+    cached = geocode_cache.get(address, country_code)
+    if cached:
+        return cached
+
+    # Extract postal code from mixed fields if not provided
+    if not postal_code:
+        extracted = extract_postal_code(address, country_code)
+        if extracted:
+            postal_code = extracted
+
     # Step 1: Parse address (detect apartment/unit)
     parsed = parse_address(address)
-    base_address = parsed['base_address']
+    base_address = normalize_address(parsed['base_address'])
     is_multi_unit = parsed['is_multi_unit']
     unit_text = parsed['unit_text']
 
-    # Step 2: Geocode base address
-    error_msg = ''
-    try:
-        geocode_results = geocode_address(base_address, country_code=country_code or None)
-    except GeocodingError as e:
-        geocode_results = []
-        error_msg = str(e)
+    # Try to extract postal code from base address if still not found
+    if not postal_code:
+        extracted_postal = extract_postal_code(base_address, country_code)
+        if extracted_postal:
+            postal_code = extracted_postal
 
-    if not geocode_results:
+    # ─── Step 2: Geocode — fill fields progressively ───────────────────────
+    # Each source fills what it can. We only call the next source if key fields are missing.
+    # KEY PRINCIPLE: Use country + city as CONSTRAINTS, not just part of the query.
+    # This ensures we find the address WITHIN the correct region, not globally.
+    
+    from .ptv_geocoder import geocode_ptv, PTV_API_KEY
+
+    # Track what we have
+    lat = 0.0
+    lon = 0.0
+    geocode_score = 0.0
+    match_type = ''
+    formatted_address = ''
+    final_postal = postal_code
+    final_city = city
+    final_district = ''
+    final_country = country
+    final_country_code = country_code
+    geocoding_source = 'None'
+    geocode_results = []
+    error_msg = ''
+    ptv_has_road_access = False
+
+    # Build a region-constrained query
+    # Strategy: Send the street/address as the search text, but use country_code as a FILTER
+    # This tells PTV "find this address, but ONLY look in this country"
+    search_query = base_address
+    
+    # If we have separate city/state but they're not already in the address, append them
+    # This helps PTV narrow down within the country
+    addr_lower = base_address.lower()
+    if city and city.lower() not in addr_lower:
+        search_query = f"{base_address}, {city}"
+    if state and state.lower() not in addr_lower and state.lower() not in (city or '').lower():
+        search_query = f"{search_query}, {state}"
+    if country and not country_code and country.lower() not in addr_lower:
+        search_query = f"{search_query}, {country}"
+
+    # Determine the country code to use as a FILTER (not part of query text)
+    # This is CRITICAL — it constrains PTV to search only within this country
+    filter_country = country_code
+    if not filter_country and country:
+        # Use the comprehensive country resolver
+        filter_country = resolve_country_code(country) or ''
+    if not filter_country:
+        # Try to detect from the address itself
+        filter_country = resolve_country_code(address) or ''
+        if not filter_country:
+            from .address_cleaner import detect_country_from_address
+            filter_country = detect_country_from_address(f"{base_address}, {city}") or ''
+
+    # ── Pass 1: PTV Developer (best for OptiFlow) ──
+    if PTV_API_KEY:
+        geocode_results = geocode_ptv(search_query, country_code=filter_country or None)
+        if geocode_results:
+            best = geocode_results[0]
+            lat = best['lat']
+            lon = best['lon']
+            geocode_score = best['score']
+            match_type = best['match_type']
+            geocoding_source = 'PTV'
+            
+            # Fill fields from PTV response
+            if best.get('address'):
+                formatted_address = best['address']
+            if best.get('postal_code'):
+                final_postal = best['postal_code']
+            if best.get('municipality'):
+                final_city = best['municipality']
+            if best.get('district'):
+                final_district = best['district']
+            if best.get('country_code'):
+                final_country_code = best['country_code']
+            
+            # PTV's roadAccessPosition is already the optimal routing point
+            if best.get('road_access_lat') and best['road_access_lat'] != 0.0:
+                ptv_has_road_access = True
+
+    # ── Pass 2: Azure Maps (only if PTV didn't return coords) ──
+    if lat == 0.0 and lon == 0.0:
+        try:
+            azure_results = geocode_address(search_query, country_code=filter_country or None)
+            if azure_results:
+                geocode_results = azure_results
+                best = azure_results[0]
+                lat = best['lat']
+                lon = best['lon']
+                geocode_score = best['score']
+                match_type = best['match_type']
+                geocoding_source = 'Azure Maps'
+                
+                if not formatted_address and best.get('address'):
+                    formatted_address = best['address']
+                if not final_postal and best.get('postal_code'):
+                    final_postal = best['postal_code']
+                if not final_city and best.get('municipality'):
+                    final_city = best['municipality']
+                if best.get('country_code'):
+                    final_country_code = best['country_code']
+        except GeocodingError as e:
+            error_msg = str(e)
+
+    # ── Pass 3: HERE / Nominatim (only if still no coords) ──
+    if lat == 0.0 and lon == 0.0:
+        fallback_results = geocode_with_fallbacks(
+            search_query,
+            country_code=filter_country or None,
+            azure_results=None,
+        )
+        if fallback_results:
+            geocode_results = fallback_results
+            best = fallback_results[0]
+            lat = best['lat']
+            lon = best['lon']
+            geocode_score = best['score']
+            match_type = best['match_type']
+            geocoding_source = best.get('source', 'Fallback')
+            
+            if not formatted_address and best.get('address'):
+                formatted_address = best['address']
+            if not final_postal and best.get('postal_code'):
+                final_postal = best['postal_code']
+            if not final_city and best.get('municipality'):
+                final_city = best['municipality']
+            if best.get('country_code'):
+                final_country_code = best['country_code']
+
+    # If still no coordinates, try smart retry with simplified variants
+    if lat == 0.0 and lon == 0.0:
+        retry_variants = generate_retry_variants(search_query)
+        for variant in retry_variants:
+            if PTV_API_KEY:
+                retry_results = geocode_ptv(variant, country_code=filter_country or None)
+                if retry_results:
+                    best = retry_results[0]
+                    lat = best['lat']
+                    lon = best['lon']
+                    geocode_score = best['score']
+                    match_type = best['match_type']
+                    geocoding_source = 'PTV (retry)'
+                    geocode_results = retry_results
+                    if best.get('address'):
+                        formatted_address = best['address']
+                    if best.get('postal_code'):
+                        final_postal = best['postal_code']
+                    if best.get('municipality'):
+                        final_city = best['municipality']
+                    if best.get('country_code'):
+                        final_country_code = best['country_code']
+                    if best.get('road_access_lat') and best['road_access_lat'] != 0.0:
+                        ptv_has_road_access = True
+                    break
+
+        # If retry with PTV failed, try PTV Places API (for business/POI names)
+        # This handles cases like "Walmart Supercenter" or "Bodega Aurrera" in a specific city
+        if lat == 0.0 and lon == 0.0 and PTV_API_KEY:
+            from .ptv_geocoder import search_places_ptv
+            
+            # Build a places search query
+            places_query = base_address
+            if city:
+                places_query = f"{base_address} {city}"
+            
+            places_results = search_places_ptv(places_query, country_code=filter_country or None)
+            if places_results:
+                best = places_results[0]
+                lat = best['lat']
+                lon = best['lon']
+                geocode_score = best['score']
+                match_type = best['match_type']
+                geocoding_source = 'PTV Places'
+                geocode_results = places_results
+                if best.get('address'):
+                    formatted_address = best['address']
+                if best.get('postal_code'):
+                    final_postal = best['postal_code']
+                if best.get('municipality'):
+                    final_city = best['municipality']
+                if best.get('country_code'):
+                    final_country_code = best['country_code']
+                if best.get('road_access_lat') and best['road_access_lat'] != 0.0:
+                    ptv_has_road_access = True
+            else:
+                # Last resort: try geocoding with just city + country for a centroid
+                if city and filter_country:
+                    city_only = f"{city}, {country}" if country else city
+                    city_results = geocode_ptv(city_only, country_code=filter_country)
+                    if city_results:
+                        best = city_results[0]
+                        lat = best['lat']
+                        lon = best['lon']
+                        geocode_score = 0.4  # Low score — city centroid only
+                        match_type = 'City'
+                        geocoding_source = 'PTV (city centroid)'
+                        geocode_results = city_results
+                        if best.get('postal_code'):
+                            final_postal = best['postal_code']
+                        if best.get('municipality'):
+                            final_city = best['municipality']
+                        if best.get('country_code'):
+                            final_country_code = best['country_code']
+
+    # If STILL no coordinates after retry, return error result
+    if lat == 0.0 and lon == 0.0:
         error_reason = error_msg if error_msg else 'No geocoding results returned'
-        return _build_result(
+        result = _build_result(
             original_address=address,
             base_address=base_address,
             unit_text=unit_text,
             is_multi_unit=is_multi_unit,
-            postal_code=postal_code,
-            city=city,
-            country_code=country_code,
+            postal_code=final_postal,
+            city=final_city,
+            country_code=final_country_code,
             error=error_reason,
         )
+        geocode_cache.put(address, country_code, result)
+        return result
 
-    best = geocode_results[0]
-    lat = best['lat']
-    lon = best['lon']
-    geocode_score = best['score']
-    match_type = best['match_type']
-    geocoded_postal = best.get('postal_code', '')
-    geocoded_country = best.get('country_code', '') or country_code
+    # ─── Step 3: Reverse geocode — ONLY if we're missing key fields ────────
+    reverse_confirms = False
+    if not formatted_address or not final_postal or not final_city:
+        try:
+            reverse_result = reverse_geocode(lat, lon)
+            if reverse_result:
+                reverse_confirms = True
+                if not formatted_address:
+                    formatted_address = reverse_result.get('formatted_address', '')
+                if not final_postal:
+                    final_postal = reverse_result.get('postal_code', '')
+                if not final_city:
+                    final_city = reverse_result.get('city', '')
+                if not final_district:
+                    final_district = reverse_result.get('district', '')
+                if not final_country:
+                    final_country = reverse_result.get('country', '')
+                if not final_country_code:
+                    final_country_code = reverse_result.get('country_code', '')
+        except ReverseGeocodingError:
+            pass
+    else:
+        # PTV/Azure already gave us everything — skip reverse geocode
+        reverse_confirms = True
 
-    # Step 3: Reverse geocode to standardize address
-    reverse_result = {'formatted_address': '', 'postal_code': '', 'city': '', 'district': '', 'country': '', 'country_code': ''}
-    try:
-        reverse_result = reverse_geocode(lat, lon)
-    except ReverseGeocodingError:
-        pass
+    # ─── Step 4: Entrance detection — ONLY if we don't have road access ────
+    precision = 'Building'
+    entrance_source = ''
+    entrance_type = ''
+    final_lat = lat
+    final_lon = lon
 
-    # Use best available postal code
-    final_postal = geocoded_postal or reverse_result.get('postal_code', '') or postal_code
-    final_city = reverse_result.get('city', '') or city
-    final_district = reverse_result.get('district', '')
-    final_country = reverse_result.get('country', '') or country
-    final_country_code = reverse_result.get('country_code', '') or geocoded_country
+    if ptv_has_road_access:
+        # PTV already gave us roadAccessPosition — that IS the entrance/road point
+        precision = 'Road Access'
+        entrance_source = 'PTV'
+    elif geocode_score >= 0.9 and match_type in ('Exact Address', 'Point Address'):
+        # High-confidence exact match — skip slow OSM entrance lookup
+        precision = 'Building'
+    else:
+        # Only call entrance finder for lower-confidence results where it might help
+        # AND only if the match is at least street-level
+        if geocode_score >= 0.5:
+            entrance = find_entrance(lat, lon)
+            if entrance['precision'] == 'Entrance':
+                final_lat = entrance['lat']
+                final_lon = entrance['lon']
+                precision = 'Entrance'
+                entrance_source = entrance.get('source', '')
+                entrance_type = entrance.get('entrance_type', '')
 
-    # Step 4: Attempt entrance detection
-    entrance = find_entrance(lat, lon)
-    has_entrance = entrance['precision'] == 'Entrance'
+    has_entrance = precision in ('Entrance', 'Road Access')
 
-    # Use entrance coordinates if found
-    final_lat = entrance['lat']
-    final_lon = entrance['lon']
-    precision = entrance['precision']
-
-    # Step 5: Apply confidence scoring
-    # Check if postal codes match
+    # ─── Step 5: Confidence scoring ────────────────────────────────────────
     postal_matches = False
     if postal_code and final_postal:
-        postal_matches = postal_code.strip().replace(' ', '').lower() == final_postal.strip().replace(' ', '').lower()
-
-    # Check if reverse geocode confirms the address
-    reverse_confirms = bool(reverse_result.get('formatted_address'))
+        # Normalize for comparison: strip spaces, lowercase, compare base (ignore ZIP+4 extension)
+        input_clean = postal_code.strip().replace(' ', '').replace('-', '').lower()
+        output_clean = final_postal.strip().replace(' ', '').replace('-', '').lower()
+        # Match if one starts with the other (handles "37803" vs "37803-2565")
+        postal_matches = input_clean.startswith(output_clean) or output_clean.startswith(input_clean)
 
     confidence = score_result(
         geocode_score=geocode_score,
@@ -123,7 +390,27 @@ def process_row(
         country_code=final_country_code,
     )
 
-    # Step 6: Determine output strategy
+    # Override: If PTV returned good result with road access, force High confidence
+    # PTV's road-access coordinates are pre-validated for routing — trust them
+    if geocoding_source in ('PTV', 'PTV (retry)') and ptv_has_road_access:
+        if geocode_score >= 0.80:
+            confidence['confidence_score'] = max(confidence['confidence_score'], 0.92)
+            confidence['confidence_level'] = 'High'
+            confidence['needs_review'] = False
+            confidence['recommendation'] = 'PTV exact match with road-access coordinates. Use directly for routing.'
+        elif geocode_score >= 0.60:
+            confidence['confidence_score'] = max(confidence['confidence_score'], 0.78)
+            confidence['confidence_level'] = 'High'
+            confidence['needs_review'] = False
+            confidence['recommendation'] = 'PTV match with road-access coordinates. Coordinates reliable for routing.'
+    elif geocoding_source in ('PTV', 'PTV (retry)') and geocode_score >= 0.80:
+        # PTV returned good score but no road access (rare)
+        confidence['confidence_score'] = max(confidence['confidence_score'], 0.76)
+        confidence['confidence_level'] = 'High'
+        confidence['needs_review'] = False
+        confidence['recommendation'] = 'PTV high-quality match. Coordinates suitable for routing.'
+
+    # ─── Step 6: Output strategy ──────────────────────────────────────────
     strategy = determine_output_strategy(
         confidence['confidence_score'],
         has_entrance,
@@ -137,7 +424,7 @@ def process_row(
         input_city=city,
     )
 
-    return {
+    result = {
         'original_address': address,
         'base_address': base_address,
         'unit_text': unit_text,
@@ -145,7 +432,7 @@ def process_row(
         'latitude': final_lat,
         'longitude': final_lon,
         'precision': precision,
-        'formatted_address': reverse_result.get('formatted_address', '') or best.get('address', ''),
+        'formatted_address': formatted_address,
         'postal_code': country_adjusted.get('postal_code', final_postal),
         'city': country_adjusted.get('city', final_city),
         'district': country_adjusted.get('district', final_district),
@@ -156,10 +443,40 @@ def process_row(
         'output_strategy': strategy,
         'needs_review': confidence['needs_review'],
         'recommendation': confidence['recommendation'],
-        'entrance_source': entrance.get('source', ''),
-        'entrance_type': entrance.get('entrance_type', ''),
-        'geocode_alternatives': geocode_results[1:],  # other results for review
+        'entrance_source': entrance_source,
+        'entrance_type': entrance_type,
+        'geocode_alternatives': geocode_results[1:] if geocode_results else [],
+        'geocoding_source': geocoding_source,
     }
+
+    # Final check: OptiFlow readiness
+    readiness = assess_optiflow_readiness(
+        result['latitude'], result['longitude'],
+        result['postal_code'], result['confidence_score'], result['confidence_level']
+    )
+    result['optiflow_ready'] = readiness['optiflow_ready']
+    result['routing_method'] = readiness['routing_method']
+
+    # If not ready but we have a postal code, try geocoding the postal code for a centroid
+    if not readiness['optiflow_ready'] and final_postal:
+        try:
+            postal_results = geocode_with_fallbacks(f"{final_postal}, {country or city}", country_code=country_code)
+            if postal_results:
+                result['latitude'] = postal_results[0]['lat']
+                result['longitude'] = postal_results[0]['lon']
+                result['precision'] = 'Postal Centroid'
+                result['confidence_level'] = 'Medium'
+                result['confidence_score'] = 0.55
+                result['optiflow_ready'] = True
+                result['routing_method'] = 'postal_centroid'
+                result['recommendation'] = f"Used postal code {final_postal} centroid (address geocoding insufficient)"
+        except Exception:
+            pass
+
+    # Cache the result for future lookups
+    geocode_cache.put(address, country_code, result)
+
+    return result
 
 
 def process_dataframe(df, address_col: str = 'address', **field_cols) -> List[Dict]:
@@ -169,8 +486,7 @@ def process_dataframe(df, address_col: str = 'address', **field_cols) -> List[Di
     Args:
         df: pandas DataFrame with address data.
         address_col: Column name containing the full address (if available).
-        **field_cols: Mapping of field names to column names:
-            street_col, city_col, state_col, postal_col, country_col, country_code_col
+        **field_cols: Mapping of field names to column names.
 
     Returns:
         List of result dictionaries, one per row.
@@ -193,20 +509,15 @@ def process_dataframe(df, address_col: str = 'address', **field_cols) -> List[Di
         country = str(row.get(country_col, '')) if country_col and country_col in df.columns else ''
         cc = str(row.get(country_code_col, '')) if country_code_col and country_code_col in df.columns else ''
 
-        # Clean nan values
-        for var_name in ['address', 'street', 'city', 'state', 'postal', 'country', 'cc']:
-            val = locals()[var_name]
-            if val == 'nan' or val == 'None':
-                locals()[var_name] = ''
-
+        def _clean(v): return '' if v in ('nan', 'None') else v
         result = process_row(
-            address=address,
-            street=street,
-            city=city,
-            state=state,
-            postal_code=postal,
-            country=country,
-            country_code=cc,
+            address=_clean(address),
+            street=_clean(street),
+            city=_clean(city),
+            state=_clean(state),
+            postal_code=_clean(postal),
+            country=_clean(country),
+            country_code=_clean(cc),
         )
         results.append(result)
 

@@ -1,5 +1,25 @@
-# Secrets
-.env
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+env/
+
+# Environment variables (API keys - never commit!)
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+
+# Streamlit
 .streamlit/secrets.toml

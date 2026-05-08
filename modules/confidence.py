@@ -59,12 +59,25 @@ def score_result(
 
     # Factor 2: Match type quality (20%)
     match_type_scores = {
+        # Azure Maps types
         'Point Address': 1.0,
         'Address Range': 0.7,
         'Street': 0.5,
         'Cross Street': 0.4,
         'Geography': 0.3,
         'POI': 0.6,
+        # PTV Developer types
+        'Exact Address': 1.0,
+        'Interpolated Address': 0.8,
+        'Postal Code': 0.4,
+        'City': 0.3,
+        'Region': 0.2,
+        'Country': 0.1,
+        # Nominatim types
+        'House': 1.0,
+        'Building': 0.9,
+        'Residential': 0.6,
+        'Place': 0.5,
     }
     factors['match_type'] = match_type_scores.get(match_type, 0.3)
 
