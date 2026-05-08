@@ -147,7 +147,6 @@ def process_row(
         # Try to detect from the address itself
         filter_country = resolve_country_code(address) or ''
         if not filter_country:
-            from .address_cleaner import detect_country_from_address
             filter_country = detect_country_from_address(f"{base_address}, {city}") or ''
 
     # ── Pass 1: PTV Developer (best for OptiFlow) ──
