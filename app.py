@@ -72,7 +72,8 @@ else:
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
+    st.image("settings_icon.png", width=120)
+    st.markdown("### Settings")
     st.markdown("---")
 
     # Column mapping
@@ -160,8 +161,11 @@ st.markdown("""
 
 col_upload_widget = st.container()
 with col_upload_widget:
-    st.subheader("📂 Upload Address File")
-    uploaded_file = st.file_uploader(
+    col_img, col_uploader = st.columns([1, 5])
+    with col_img:
+        st.image("upload_icon.png", width=120)
+    with col_uploader:
+        uploaded_file = st.file_uploader(
         "Upload CSV or Excel file",
         type=['csv', 'xlsx', 'xls'],
         help="File should contain address data in one or more columns",
@@ -277,8 +281,12 @@ if uploaded_file:
 
         # ─── Run Geocoding ─────────────────────────────────────────────────────
 
-        run_button = st.button("🚛 Run Geocoding", type="primary", use_container_width=True)
-        st.caption(f"Will process {len(df)} addresses using PTV Developer + fallback geocoders")
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            st.image("geocode_icon.png", width=120)
+        with col2:
+            run_button = st.button("🚛 Run Geocoding", type="primary", use_container_width=True)
+            st.caption(f"Will process {len(df)} addresses using PTV Developer + fallback geocoders")
 
         if run_button:
             if not AZURE_MAPS_KEY and not PTV_KEY_AVAILABLE:
@@ -763,15 +771,23 @@ if uploaded_file:
 else:
     # No file uploaded — show single address test
     st.markdown("---")
-    st.subheader("🚛 Test Single Address")
 
-    test_address = st.text_input(
-        "Enter an address to test",
-        value="451 holland springs drive, maryville, tn",
-        help="Try any address worldwide — US, Peru, UK, Germany, etc.",
-    )
+    col_test_img, col_test_input = st.columns([1, 5])
+    with col_test_img:
+        st.image("test_address_icon.png", width=120)
+    with col_test_input:
+        st.subheader("Test Single Address")
+        test_address = st.text_input(
+            "Enter an address to test",
+            value="451 holland springs drive, maryville, tn",
+            help="Try any address worldwide — US, Peru, UK, Germany, etc.",
+        )
 
-    geocode_clicked = st.button("Run Geocoding", type="primary")
+    col_geo_img, col_geo_btn = st.columns([1, 5])
+    with col_geo_img:
+        st.image("geocode_icon.png", width=120)
+    with col_geo_btn:
+        geocode_clicked = st.button("🚛 Run Geocoding", type="primary", use_container_width=True)
 
     if geocode_clicked:
         with st.spinner("Geocoding..."):
