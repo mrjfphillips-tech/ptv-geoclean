@@ -407,11 +407,11 @@ def decompose_batch(
             "longitude": float(row["existing_lon"]),
         })
 
-    # Call PTV batch reverse geocode (batch_size=500, max_concurrent=4)
+    # Call PTV batch reverse geocode (batch_size=1000, max_concurrent=8)
     batch_results, batch_error = reverse_geocode_batch_ptv(
         positions,
-        batch_size=500,
-        max_concurrent_batches=4,
+        batch_size=1000,
+        max_concurrent_batches=8,
     )
 
     # ── Step 3: Process batch results, identify failures ──
