@@ -35,6 +35,7 @@ def process_row(
     country: str = '',
     country_code: str = '',
     phone: str = '',
+    skip_retries: bool = False,
 ) -> Dict:
     """
     Process a single address row through the pipeline.
@@ -200,33 +201,12 @@ def process_row(
         except GeocodingError as e:
             error_msg = str(e)
 
-    # ── Pass 3: HERE / Nominatim (only if still no coords) ──
-    if lat == 0.0 and lon == 0.0:
-        fallback_results = geocode_with_fallbacks(
-            search_query,
-            country_code=filter_country or None,
-            azure_results=None,
-        )
-        if fallback_results:
-            geocode_results = fallback_results
-            best = fallback_results[0]
-            lat = best['lat']
-            lon = best['lon']
-            geocode_score = best['score']
-            match_type = best['match_type']
-            geocoding_source = best.get('source', 'Fallback')
-            
-            if not formatted_address and best.get('address'):
-                formatted_address = best['address']
-            if not final_postal and best.get('postal_code'):
-                final_postal = best['postal_code']
-            if not final_city and best.get('municipality'):
-                final_city = best['municipality']
-            if best.get('country_code'):
-                final_country_code = best['country_code']
+    # Pass 3 (Nominatim) removed — serialises all threads to 1 req/sec and produces
+    # lower-quality results than PTV's postal/city centroid fallback below.
+    # Addresses that fail PTV and Azure fall through to the retry and city-centroid paths.
 
     # If still no coordinates, try smart retry with simplified variants
-    if lat == 0.0 and lon == 0.0:
+    if lat == 0.0 and lon == 0.0 and not skip_retries:
         retry_variants = generate_retry_variants(search_query)
         for variant in retry_variants:
             if PTV_API_KEY:
@@ -318,7 +298,10 @@ def process_row(
 
     # ─── Step 3: Reverse geocode — ONLY if we're missing key fields ────────
     reverse_confirms = False
-    if not formatted_address or not final_postal or not final_city:
+    if skip_retries:
+        # In fast verify mode, skip reverse geocode — we just need forward geocode coords
+        reverse_confirms = bool(formatted_address and final_postal and final_city)
+    elif not formatted_address or not final_postal or not final_city:
         try:
             reverse_result = reverse_geocode(lat, lon)
             if reverse_result:
@@ -348,16 +331,19 @@ def process_row(
     final_lat = lat
     final_lon = lon
 
-    if ptv_has_road_access:
-        # PTV already gave us roadAccessPosition — that IS the entrance/road point
-        precision = 'Road Access'
-        entrance_source = 'PTV'
+    if skip_retries:
+        # In fast verify mode, skip entrance detection entirely
+        if geocoding_source in ('PTV', 'PTV (retry)', 'PTV Places', 'PTV (city centroid)'):
+            precision = 'Road Access' if ptv_has_road_access else 'Building'
+            entrance_source = 'PTV' if ptv_has_road_access else ''
+    elif geocoding_source in ('PTV', 'PTV (retry)', 'PTV Places', 'PTV (city centroid)'):
+        # PTV coordinates are already routing-quality — roadAccessPosition is better
+        # than anything OSM entrance detection can provide, so skip the Overpass call.
+        precision = 'Road Access' if ptv_has_road_access else 'Building'
+        entrance_source = 'PTV' if ptv_has_road_access else ''
     elif geocode_score >= 0.9 and match_type in ('Exact Address', 'Point Address'):
-        # High-confidence exact match — skip slow OSM entrance lookup
         precision = 'Building'
     else:
-        # Only call entrance finder for lower-confidence results where it might help
-        # AND only if the match is at least street-level
         if geocode_score >= 0.5:
             entrance = find_entrance(lat, lon)
             if entrance['precision'] == 'Entrance':
@@ -456,10 +442,13 @@ def process_row(
     result['optiflow_ready'] = readiness['optiflow_ready']
     result['routing_method'] = readiness['routing_method']
 
-    # If not ready but we have a postal code, try geocoding the postal code for a centroid
-    if not readiness['optiflow_ready'] and final_postal:
+    # If not ready but we have a postal code, try PTV only for a fast postal centroid.
+    # Deliberately skip geocode_with_fallbacks here — its Nominatim path has a 1 req/sec
+    # global lock that serialises all parallel workers and causes ~20 min runtimes.
+    if not readiness['optiflow_ready'] and final_postal and PTV_API_KEY and not skip_retries:
         try:
-            postal_results = geocode_with_fallbacks(f"{final_postal}, {country or city}", country_code=country_code)
+            postal_query = f"{final_postal}, {country or city}" if (country or city) else final_postal
+            postal_results = geocode_ptv(postal_query, country_code=filter_country or None)
             if postal_results:
                 result['latitude'] = postal_results[0]['lat']
                 result['longitude'] = postal_results[0]['lon']

@@ -3,6 +3,7 @@ REM ============================================
 REM  GeoClean — One-Click Setup
 REM  Fuzzy Geocoding with Confidence
 REM ============================================
+cd /d "%~dp0"
 echo.
 echo  ========================================
 echo   GeoClean - Setup Wizard
@@ -23,12 +24,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/3] Python found:
+echo [1/4] Python found:
 python --version
 echo.
 
 REM Install dependencies
-echo [2/3] Installing required packages...
+echo [2/4] Installing required packages...
 echo.
 pip install -r requirements.txt --quiet
 if errorlevel 1 (
@@ -40,9 +41,21 @@ echo.
 echo      Done!
 echo.
 
+REM Add Windows Firewall rule so GeoClean launches without admin prompts
+echo [3/4] Adding firewall rule for GeoClean (prevents future admin prompts)...
+for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)"') do set PYTHON_PATH=%%P
+netsh advfirewall firewall delete rule name="GeoClean Python" >nul 2>&1
+netsh advfirewall firewall add rule name="GeoClean Python" dir=in action=allow program="%PYTHON_PATH%" profile=any enable=yes >nul 2>&1
+if errorlevel 0 (
+    echo      Firewall rule added successfully.
+) else (
+    echo      NOTE: Could not add firewall rule. You may see a firewall prompt on first launch.
+)
+echo.
+
 REM Check for .env file
 if not exist ".env" (
-    echo [3/3] Creating .env configuration file...
+    echo [4/4] Creating .env configuration file...
     echo.
     echo  You need an Azure Maps API key to use geocoding.
     echo  Get one free at: https://portal.azure.com
@@ -62,7 +75,7 @@ if not exist ".env" (
         echo      Skipped. Edit the .env file later with your key.
     )
 ) else (
-    echo [3/3] .env file already exists. Good!
+    echo [4/4] .env file already exists. Good!
 )
 
 echo.

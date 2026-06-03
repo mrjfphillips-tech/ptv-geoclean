@@ -5,6 +5,7 @@ Falls back to original geocode coordinates if no entrance data is found.
 """
 
 import requests
+import threading
 from typing import Dict, Optional
 import math
 
@@ -12,6 +13,10 @@ import math
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_TIMEOUT = 10  # seconds
 SEARCH_RADIUS_METERS = 50  # search radius around the geocoded point
+
+# Cap concurrent OSM Overpass calls — it's a shared public service that throttles
+# aggressively under load. 5 simultaneous requests is safe regardless of worker count.
+_overpass_semaphore = threading.Semaphore(5)
 
 
 def find_entrance(lat: float, lon: float) -> Dict:
@@ -36,6 +41,11 @@ def find_entrance(lat: float, lon: float) -> Dict:
             - source: "OSM" or "Fallback"
             - entrance_type: Specific type found (e.g., "main", "yes", "parking")
     """
+    with _overpass_semaphore:
+        return _find_entrance_inner(lat, lon)
+
+
+def _find_entrance_inner(lat: float, lon: float) -> Dict:
     # Try OSM Overpass API for entrance nodes
     try:
         entrances = _query_osm_entrances(lat, lon, SEARCH_RADIUS_METERS)

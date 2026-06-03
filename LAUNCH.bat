@@ -9,12 +9,8 @@ echo  ========================================
 echo   GeoClean - Fuzzy Geocoding
 echo  ========================================
 echo.
+echo  Starting GeoClean...
+echo  (Browser will open automatically)
+echo.
 
-REM Start the server in the background, then open browser
-start /min "" python -m streamlit run app.py --server.headless false
-
-REM Wait for server to start, then open browser
-timeout /t 4 /nobreak >nul
-start http://localhost:8501
-
-exit
+python launch.py

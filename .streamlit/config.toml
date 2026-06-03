@@ -1,9 +1,21 @@
 [theme]
-primaryColor = "#4CAF50"
+primaryColor = "#E31E24"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f5f7fa"
+secondaryBackgroundColor = "#f2f2f2"
 textColor = "#333333"
 font = "sans serif"
 
 [server]
 headless = true
+address = "127.0.0.1"
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 500
+maxMessageSize = 500
+
+[browser]
+gatherUsageStats = false
+
+[general]
+email = ""

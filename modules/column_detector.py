@@ -6,6 +6,7 @@ using fuzzy string matching and common naming patterns.
 
 from typing import Dict, List, Optional
 from rapidfuzz import fuzz, process
+import pandas as pd
 import re
 
 
@@ -97,6 +98,21 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
     # Skip patterns — only skip columns that are PURELY these (not compound names)
     skip_exact = {'id', 'row', 'index', 'seq', 'sequence'}
 
+    # Words that indicate a column is NOT an address field — if a column's
+    # non-matching words contain these, it's probably something else entirely.
+    # e.g., "Order Number" has "order" which signals it's an order field, not a street number.
+    NON_ADDRESS_INDICATORS = {
+        'order', 'tracking', 'phone', 'email', 'date', 'time', 'timestamp',
+        'id', 'code', 'status', 'type', 'flag', 'count', 'total', 'amount',
+        'price', 'cost', 'weight', 'volume', 'quantity', 'qty', 'service',
+        'delivery', 'default', 'schedule', 'hub', 'origin', 'box', 'millis',
+        'timezone', 'tz', 'created', 'updated', 'modified', 'version',
+    }
+
+    # For these fields, require stronger evidence before matching
+    # (these are the ones most prone to false positives)
+    STRICT_FIELDS = {'number', 'city', 'street', 'state', 'neighborhood', 'postal_code', 'country'}
+
     for field, patterns in FIELD_PATTERNS.items():
         best_match: Optional[str] = None
         best_score: float = 0
@@ -120,6 +136,14 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
             for pattern in patterns:
                 # Check if pattern is a word within the column name
                 if pattern in col_norm:
+                    # For strict fields, verify the match isn't a false positive
+                    # e.g., "default delivery date" contains "delivery" but isn't a street
+                    if field in STRICT_FIELDS:
+                        col_words = set(re.split(r'[\s_\-./]+', col_norm))
+                        if col_words & NON_ADDRESS_INDICATORS:
+                            # Has disqualifying words — only match if the FULL pattern matches
+                            if pattern != col_norm:
+                                continue
                     score = 85 + (len(pattern) / len(col_norm)) * 15  # Longer match = higher score
                     if score > best_score:
                         best_score = score
@@ -138,11 +162,29 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
             # Split column into words and check if any word matches a pattern
             if best_score < 80:
                 col_words = set(re.split(r'[\s_\-./]+', col_norm))
+                # For strict fields, check if non-matching words are "non-address" indicators
+                # e.g., "Order Number" → col_words = {order, number} → "order" is a non-address indicator
+                if field in STRICT_FIELDS:
+                    non_match_words = col_words - set(p for pattern in patterns for p in re.split(r'[\s_\-./]+', pattern))
+                    if non_match_words & NON_ADDRESS_INDICATORS:
+                        continue  # Skip this column for this field entirely
+
                 for pattern in patterns:
                     pattern_words = set(re.split(r'[\s_\-./]+', pattern))
                     # If any word in the column matches any word in the pattern
                     common = col_words & pattern_words
                     if common:
+                        # For strict fields, require the PRIMARY word to match, not just a qualifier
+                        # e.g., for field "city", the word "city" itself must be in common, not just "customer"
+                        if field in STRICT_FIELDS:
+                            # The field name itself (or a core synonym) must be the matching word
+                            core_words = set(re.split(r'[\s_\-./]+', field))  # e.g., {'city'}, {'number'}
+                            if not (common & core_words) and not any(p == col_norm for p in patterns):
+                                # Check if any of the common words is actually the field's semantic name
+                                field_semantic = {field, field + 's'}  # "city", "cities" etc.
+                                if not (common & field_semantic):
+                                    continue  # Skip — the match is on a qualifier, not the field name
+
                         # Score based on how many words match
                         score = 75 + (len(common) / max(len(col_words), len(pattern_words))) * 20
                         if score > best_score:
@@ -152,14 +194,17 @@ def detect_columns(columns: List[str]) -> Dict[str, Optional[str]]:
 
             # Strategy 4: Fuzzy match against all patterns (lower threshold)
             if best_score < MIN_MATCH_SCORE:
+                # For strict fields, require higher fuzzy threshold to avoid false positives
+                fuzzy_threshold = 80 if field in STRICT_FIELDS else MIN_MATCH_SCORE
+
                 result = process.extractOne(col_norm, patterns, scorer=fuzz.ratio)
-                if result and result[1] > best_score:
+                if result and result[1] > best_score and result[1] >= fuzzy_threshold:
                     best_score = result[1]
                     best_match = col
 
                 # Also try token_sort_ratio for multi-word columns
                 result2 = process.extractOne(col_norm, patterns, scorer=fuzz.token_sort_ratio)
-                if result2 and result2[1] > best_score:
+                if result2 and result2[1] > best_score and result2[1] >= fuzzy_threshold:
                     best_score = result2[1]
                     best_match = col
 
@@ -200,15 +245,34 @@ def has_minimum_fields(detected: Dict[str, Optional[str]]) -> bool:
     return has_full_address or has_street_city or has_coords
 
 
-def get_mode(detected: Dict[str, Optional[str]]) -> str:
+def get_mode(
+    detected: Dict[str, Optional[str]],
+    mapping: Optional[Dict[str, str]] = None,
+    df: Optional[pd.DataFrame] = None,
+) -> str:
     """
     Determine the processing mode based on detected columns.
 
-    Returns:
+    Mode priority (highest to lowest):
+        "decompose" — lat/lon + combined address + no structured fields → reverse geocode to extract components
         "verify" — has existing lat/lon, will verify against geocode
         "geocode" — no existing coords, will geocode from address
         "insufficient" — not enough data to process
+
+    Args:
+        detected: Dictionary of auto-detected column mappings.
+        mapping: Optional finalized column mapping dict (with user overrides).
+                 Required for "decompose" mode detection.
+        df: Optional uploaded DataFrame. Required for "decompose" mode detection.
+
+    Returns:
+        One of "decompose", "verify", "geocode", or "insufficient".
     """
+    # Check for decompose mode (highest priority) when mapping and df are provided
+    if mapping is not None and df is not None:
+        if is_single_cell_condition(mapping, df):
+            return "decompose"
+
     has_coords = detected.get('latitude') is not None and detected.get('longitude') is not None
     has_address = (
         detected.get('address') is not None or
@@ -223,6 +287,97 @@ def get_mode(detected: Dict[str, Optional[str]]) -> str:
         return "verify"  # Can reverse-geocode to verify
     else:
         return "insufficient"
+
+
+def _is_mapped(mapping: Dict[str, str], field: str) -> bool:
+    """
+    Check if a field is considered "mapped" in the column mapping dict.
+    A field is unmapped if it is absent, None, empty string, or "(none)".
+    """
+    value = mapping.get(field)
+    if value is None:
+        return False
+    if isinstance(value, str) and (value.strip() == "" or value.strip().lower() == "(none)"):
+        return False
+    return True
+
+
+def _column_has_valid_values(df: pd.DataFrame, col_name: str) -> bool:
+    """
+    Check if a column in the DataFrame has at least one non-empty, non-NaN value.
+    """
+    if col_name not in df.columns:
+        return False
+    series = df[col_name]
+    # Drop NaN/None values, then check for non-empty strings
+    for val in series.dropna():
+        if isinstance(val, str):
+            if val.strip() != "":
+                return True
+        else:
+            # Numeric or other non-null value counts as valid
+            return True
+    return False
+
+
+def _column_has_valid_numeric(df: pd.DataFrame, col_name: str) -> bool:
+    """
+    Check if a column has at least one valid numeric value.
+    """
+    if col_name not in df.columns:
+        return False
+    series = pd.to_numeric(df[col_name], errors='coerce')
+    return series.notna().any()
+
+
+def is_single_cell_condition(mapping: Dict[str, str], df: pd.DataFrame) -> bool:
+    """
+    Determine if the Single_Cell_Condition is met:
+    - Latitude column is mapped and contains at least one valid numeric value
+    - Longitude column is mapped and contains at least one valid numeric value
+    - Address column is mapped and contains at least one non-empty, non-NaN value
+    - NO separate street, city, state, or postal_code columns are mapped
+      (or their mapped columns contain only empty/NaN values)
+
+    A column is considered "unmapped" if its mapping value is None, empty string,
+    or "(none)" (case-insensitive).
+
+    Args:
+        mapping: The finalized column mapping dict from the UI (keys: 'latitude',
+                 'longitude', 'address', 'street', 'city', 'state', 'postal_code')
+        df: The uploaded DataFrame
+
+    Returns:
+        True if Single_Cell_Condition is met.
+    """
+    # Check latitude is mapped with valid numeric values
+    if not _is_mapped(mapping, 'latitude'):
+        return False
+    if not _column_has_valid_numeric(df, mapping['latitude']):
+        return False
+
+    # Check longitude is mapped with valid numeric values
+    if not _is_mapped(mapping, 'longitude'):
+        return False
+    if not _column_has_valid_numeric(df, mapping['longitude']):
+        return False
+
+    # Check address is mapped with at least one non-empty value
+    if not _is_mapped(mapping, 'address'):
+        return False
+    if not _column_has_valid_values(df, mapping['address']):
+        return False
+
+    # Check NO separate structured fields are mapped
+    structured_fields = ['street', 'city', 'state', 'postal_code']
+    for field in structured_fields:
+        if _is_mapped(mapping, field):
+            # Field is mapped — check if it has actual non-empty values
+            col_name = mapping[field]
+            if _column_has_valid_values(df, col_name):
+                return False
+
+    return True
 
 
 # ─── Self-test ─────────────────────────────────────────────────────────────────

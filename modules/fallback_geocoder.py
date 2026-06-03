@@ -11,6 +11,7 @@ Priority chain:
 
 import requests
 import time
+import threading
 from typing import List, Dict, Optional
 import os
 from .ptv_geocoder import geocode_ptv, PTV_API_KEY
@@ -19,8 +20,10 @@ from .ptv_geocoder import geocode_ptv, PTV_API_KEY
 # HERE API key (optional — free tier gives 1000 requests/day)
 HERE_API_KEY = os.getenv("HERE_API_KEY", "")
 
-# Rate limiting for Nominatim (max 1 request per second per their policy)
+# Rate limiting for Nominatim (max 1 request per second per their policy).
+# Lock ensures threads serialize rather than racing past the elapsed check.
 _last_nominatim_call = 0.0
+_nominatim_lock = threading.Lock()
 
 
 def geocode_nominatim(
@@ -42,10 +45,11 @@ def geocode_nominatim(
     """
     global _last_nominatim_call
 
-    # Respect rate limit (1 req/sec)
-    elapsed = time.time() - _last_nominatim_call
-    if elapsed < 1.0:
-        time.sleep(1.0 - elapsed)
+    with _nominatim_lock:
+        elapsed = time.time() - _last_nominatim_call
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
+        _last_nominatim_call = time.time()
 
     url = "https://nominatim.openstreetmap.org/search"
     params = {
@@ -63,7 +67,6 @@ def geocode_nominatim(
 
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
-        _last_nominatim_call = time.time()
         response.raise_for_status()
     except requests.exceptions.RequestException:
         return []

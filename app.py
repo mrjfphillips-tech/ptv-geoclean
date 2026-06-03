@@ -12,7 +12,8 @@ from modules.pipeline import process_row, process_dataframe
 from modules.exporter import export_to_excel, results_to_dataframe
 from modules.address_parser import parse_address
 from modules.verifier import verify_coordinates, has_existing_coordinates
-from modules.column_detector import detect_columns, get_detection_summary, has_minimum_fields, get_mode
+from modules.column_detector import detect_columns, get_detection_summary, has_minimum_fields, get_mode, is_single_cell_condition
+from modules.address_decomposer import decompose_batch
 from modules.template import generate_template
 from config import AZURE_MAPS_KEY
 
@@ -43,7 +44,7 @@ def _empty_result_for_error(address: str, error: str) -> dict:
 
 st.set_page_config(
     page_title="GeoClean — Smart Locations",
-    page_icon="📍",
+    page_icon="🚛",
     layout="wide",
 )
 
@@ -240,6 +241,9 @@ if uploaded_file:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
+            df = pd.read_excel(uploaded_file, engine='calamine')
+        except Exception:
+            uploaded_file.seek(0)
             df = pd.read_excel(uploaded_file)
 
         st.success(f"✅ Loaded **{len(df)} rows** × {len(df.columns)} columns")
@@ -464,7 +468,7 @@ if uploaded_file:
                 completed = 0
                 start_time = _time.time()
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                with ThreadPoolExecutor(max_workers=50) as executor:
                     future_to_idx = {
                         executor.submit(geocode_one, prep): idx
                         for idx, prep in enumerate(prepared_rows)
