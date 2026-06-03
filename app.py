@@ -241,24 +241,29 @@ if uploaded_file:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
-            df = pd.read_excel(uploaded_file, engine='calamine')
-        except Exception:
-            uploaded_file.seek(0)
-            df = pd.read_excel(uploaded_file)
+            try:
+                df = pd.read_excel(uploaded_file, engine='calamine')
+            except Exception:
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file)
 
         st.success(f"✅ Loaded **{len(df)} rows** × {len(df.columns)} columns")
 
         # Auto-detect columns
         detected = detect_columns(df.columns.tolist())
-        mode = get_mode(detected)
+        # Use session state mapping if available (for re-runs after user selects columns)
+        _prev_mapping = st.session_state.get('mapping')
+        mode = get_mode(detected, _prev_mapping, df) if _prev_mapping else get_mode(detected)
 
         # Build options list: ["(none)", ...all columns...]
         col_options = ["(none)"] + df.columns.tolist()
 
         # Show detection results with override dropdowns
         with st.expander("🔍 Column Mapping — Auto-Detected (override with dropdowns)", expanded=True):
-            if mode == "verify":
-                st.info("📍 **Verification Mode** — Your data has coordinates. GeoClean will verify them against geocoded results and flag discrepancies.")
+            if mode == "decompose":
+                st.info("🚛 **Decompose Mode** — Detected valid coordinates with combined address — using reverse geocoding to decompose address into structured fields.")
+            elif mode == "verify":
+                st.info("🚛 **Verification Mode** — Your data has coordinates. GeoClean will verify them against geocoded results and flag discrepancies.")
             elif mode == "geocode":
                 st.info("🗺️ **Geocoding Mode** — No existing coordinates found. GeoClean will geocode from address fields.")
             else:
@@ -303,6 +308,18 @@ if uploaded_file:
             'latitude': _val(sel_lat),
             'longitude': _val(sel_lon),
         }
+
+        # Re-compute mode with finalized mapping (enables decompose mode detection)
+        mapping = st.session_state['mapping']
+        mode = get_mode(detected, mapping, df)
+
+        # Display decompose mode notification after column mapping is finalized
+        if mode == "decompose":
+            st.info("🚛 Detected valid coordinates with combined address — using reverse geocoding to decompose address into structured fields.")
+        elif mapping.get('address') and mapping['address'] in df.columns:
+            from modules.column_detector import _column_has_valid_values
+            if not _column_has_valid_values(df, mapping['address']):
+                st.warning("⚠️ The mapped address column contains no usable data (all values are empty or NaN).")
 
         # Data preview
         with st.expander("📋 Data Preview", expanded=False):
@@ -406,6 +423,10 @@ if uploaded_file:
 
                 def geocode_one(prepared):
                     """Geocode a single prepared row."""
+                    # In verify mode, skip expensive retries — just PTV + Azure
+                    is_verify_fallback = has_existing_coordinates(
+                        prepared['existing_lat'], prepared['existing_lon']
+                    )
                     result = process_row(
                         address=prepared['addr'],
                         street=prepared['street'],
@@ -414,6 +435,7 @@ if uploaded_file:
                         postal_code=prepared['postal'],
                         country=prepared['country'],
                         country_code=prepared['cc'],
+                        skip_retries=is_verify_fallback,
                     )
 
                     # Carry through original row data for the export
@@ -461,34 +483,95 @@ if uploaded_file:
                 for _, row in df.iterrows():
                     prepared_rows.append(prepare_row(row))
 
-                # Process in parallel (10 concurrent threads)
+                # Split rows: those with existing coordinates vs those without
                 import time as _time
-                progress.progress(0, text="Geocoding addresses (parallel)...")
+                progress.progress(0, text="Geocoding addresses...")
                 results = [None] * len(prepared_rows)
-                completed = 0
                 start_time = _time.time()
 
-                with ThreadPoolExecutor(max_workers=50) as executor:
-                    future_to_idx = {
-                        executor.submit(geocode_one, prep): idx
-                        for idx, prep in enumerate(prepared_rows)
-                    }
-                    for future in as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            results[idx] = future.result()
-                        except Exception as e:
-                            results[idx] = _empty_result_for_error(prepared_rows[idx]['addr'], str(e))
-                        completed += 1
-                        if completed % 5 == 0 or completed == len(prepared_rows):
-                            elapsed = _time.time() - start_time
-                            rate = completed / elapsed if elapsed > 0 else 0
-                            remaining = (len(prepared_rows) - completed) / rate if rate > 0 else 0
-                            eta_str = f"~{int(remaining)}s remaining" if remaining > 0 else "finishing..."
-                            progress.progress(
-                                completed / len(prepared_rows),
-                                text=f"Processing {completed}/{len(prepared_rows)} — {eta_str}"
-                            )
+                rows_with_coords = []
+                rows_without_coords = []
+                for idx, prep in enumerate(prepared_rows):
+                    if has_existing_coordinates(prep['existing_lat'], prep['existing_lon']):
+                        rows_with_coords.append((idx, prep))
+                    else:
+                        rows_without_coords.append((idx, prep))
+
+                # ── Path 0: Address Decomposition (Single_Cell_Condition) ──────
+                if mode == "decompose" and rows_with_coords:
+                    from modules.address_decomposer import validate_coordinate
+
+                    decompose_rows = []
+                    non_decompose_rows = []
+                    for global_idx, prep in rows_with_coords:
+                        is_valid, _reason = validate_coordinate(prep['existing_lat'], prep['existing_lon'])
+                        if is_valid:
+                            decompose_rows.append((global_idx, prep))
+                        else:
+                            non_decompose_rows.append((global_idx, prep))
+
+                    if decompose_rows:
+                        n_decompose = len(decompose_rows)
+                        st.info(f"🚛 Decomposing **{n_decompose}** addresses from coordinates via reverse geocoding")
+
+                        decompose_prepared = [prep for _, prep in decompose_rows]
+
+                        def _decompose_progress(done, total):
+                            frac = min(done / total, 1.0) if total > 0 else 1.0
+                            progress.progress(frac * 0.85, text=f"Decomposing addresses: {done}/{total} rows...")
+
+                        progress.progress(0, text=f"Decomposing {n_decompose} addresses from coordinates...")
+                        decompose_results, decompose_fallback = decompose_batch(
+                            decompose_prepared, progress_callback=_decompose_progress,
+                        )
+
+                        for local_i, (global_idx, _prep) in enumerate(decompose_rows):
+                            if decompose_results[local_i] is not None:
+                                results[global_idx] = decompose_results[local_i]
+
+                        for fallback_local_idx, fallback_row in decompose_fallback:
+                            global_idx = decompose_rows[fallback_local_idx][0]
+                            rows_without_coords.append((global_idx, fallback_row))
+
+                        progress.progress(0.88, text="Address decomposition complete.")
+
+                    for global_idx, prep in non_decompose_rows:
+                        rows_without_coords.append((global_idx, prep))
+
+                    rows_with_coords = []
+
+                # ── Path 1: Forward geocode all remaining rows (50 workers) ────
+                remaining_rows = rows_with_coords + rows_without_coords
+                if remaining_rows:
+                    n_fwd = len(remaining_rows)
+                    completed = 0
+
+                    with ThreadPoolExecutor(max_workers=50) as executor:
+                        future_to_idx = {
+                            executor.submit(geocode_one, prep): global_idx
+                            for global_idx, prep in remaining_rows
+                        }
+                        for future in as_completed(future_to_idx):
+                            global_idx = future_to_idx[future]
+                            try:
+                                results[global_idx] = future.result()
+                            except Exception as e:
+                                results[global_idx] = _empty_result_for_error(prepared_rows[global_idx]['addr'], str(e))
+                            completed += 1
+                            if completed % 5 == 0 or completed == n_fwd:
+                                elapsed = _time.time() - start_time
+                                rate = completed / elapsed if elapsed > 0 else 0
+                                remaining = (n_fwd - completed) / rate if rate > 0 else 0
+                                if remaining > 60:
+                                    eta_str = f"~{remaining / 60:.1f} min remaining"
+                                elif remaining > 0:
+                                    eta_str = f"~{int(remaining)}s remaining"
+                                else:
+                                    eta_str = "finishing..."
+                                progress.progress(
+                                    completed / n_fwd,
+                                    text=f"Processing {completed}/{n_fwd} — 50 workers — {eta_str}"
+                                )
 
                 # Post-processing: detect outliers
                 from modules.address_cleaner import detect_outliers
