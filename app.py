@@ -72,7 +72,7 @@ else:
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.image("settings_icon.png", width=160)
+    st.markdown("### ⚙️ Settings")
     st.markdown("---")
 
     # Column mapping
@@ -113,114 +113,52 @@ with st.sidebar:
 
 # ─── File Upload ───────────────────────────────────────────────────────────────
 
-import base64
-
-# Custom CSS for styling
+# Custom CSS for styling — PTV Red theme consistency
 st.markdown("""
 <style>
-    /* Global font size increase */
-    html, body, [class*="css"] {
-        font-size: 1.1rem !important;
-    }
-    
-    /* Sidebar text larger */
-    [data-testid="stSidebar"] {
-        font-size: 1.05rem !important;
-    }
-    [data-testid="stSidebar"] label {
-        font-size: 1.05rem !important;
-    }
-    
-    /* Make input fields lighter so they stand out */
+    /* Override dark theme inputs to match PTV light theme */
     .stTextInput > div > div > input,
     .stSelectbox > div > div,
     [data-testid="stFileUploader"] {
-        background-color: #1a2332 !important;
-        border: 1px solid #2d4a5e !important;
-        font-size: 1.1rem !important;
-    }
-    
-    /* Input labels larger */
-    .stTextInput label, .stSelectbox label, .stMultiSelect label {
-        font-size: 1.1rem !important;
+        font-size: 1.05rem !important;
     }
     
     /* Larger font for captions and labels */
     .big-caption {
-        font-size: 1.2rem !important;
-        color: #00d4ff !important;
+        font-size: 1.1rem !important;
+        color: #E31E24 !important;
         margin-top: 0.5rem;
     }
     
-    /* Regular captions bigger */
-    .stCaption, [data-testid="stCaptionContainer"] {
-        font-size: 1.0rem !important;
-    }
-    
-    /* Center content vertically in columns */
-    [data-testid="column"] {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-    
-    /* Style the file uploader drop zone */
-    [data-testid="stFileUploader"] section {
-        background-color: #1a2332 !important;
-        border: 2px dashed #2d4a5e !important;
-        border-radius: 8px;
-    }
-    
-    /* Make buttons more visible */
+    /* Make buttons PTV red */
     .stButton > button[kind="primary"] {
-        font-size: 1.3rem !important;
+        font-size: 1.2rem !important;
         font-weight: bold !important;
-        background-color: #1a2332 !important;
-        border: 1px solid #2d4a5e !important;
-        color: #00d4ff !important;
+        background-color: #E31E24 !important;
+        border: none !important;
+        color: #ffffff !important;
     }
     .stButton > button[kind="primary"]:hover {
-        background-color: #243447 !important;
-        border-color: #00d4ff !important;
+        background-color: #C2185B !important;
     }
     .stButton > button {
-        font-size: 1.1rem !important;
-    }
-    
-    /* Markdown text larger */
-    .stMarkdown p, .stMarkdown li {
-        font-size: 1.1rem !important;
-    }
-    
-    /* Expander text */
-    .streamlit-expanderHeader {
-        font-size: 1.1rem !important;
-    }
-    
-    /* Data editor / table text */
-    [data-testid="stDataFrame"] {
-        font-size: 1.0rem !important;
+        font-size: 1.05rem !important;
     }
     
     /* Download buttons */
     .stDownloadButton > button {
-        font-size: 1.1rem !important;
+        font-size: 1.05rem !important;
+        background-color: #E31E24 !important;
+        color: white !important;
+        border: none !important;
     }
-    
-    /* Sidebar collapsed — show settings gear icon */
-    [data-testid="collapsedControl"] {
-        background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%2300d4ff"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.61 3.61 0 0 1 8.4 12 3.61 3.61 0 0 1 12 8.4a3.61 3.61 0 0 1 3.6 3.6 3.61 3.61 0 0 1-3.6 3.6z"/></svg>') !important;
-        background-repeat: no-repeat !important;
-        background-position: center !important;
-        background-size: 24px !important;
-        min-height: 40px !important;
+    .stDownloadButton > button:hover {
+        background-color: #C2185B !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-col_upload_img, col_upload_widget = st.columns([1, 5])
-with col_upload_img:
-    st.image("upload_icon.png", width=140)
+col_upload_widget = st.container()
 with col_upload_widget:
     uploaded_file = st.file_uploader(
         "Upload CSV or Excel file",
@@ -228,7 +166,7 @@ with col_upload_widget:
         help="File should contain address data in one or more columns",
         label_visibility="collapsed",
     )
-    st.markdown('<p class="big-caption">Drag & drop or click to browse — CSV, XLSX, XLS</p>', unsafe_allow_html=True)
+    st.caption("Drag & drop or click to browse — CSV, XLSX, XLS")
     template_buffer = generate_template()
     st.download_button(
         label="📥 Download Template",
@@ -338,13 +276,8 @@ if uploaded_file:
 
         # ─── Run Geocoding ─────────────────────────────────────────────────────
 
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            st.image("geocode_icon.png", width=140)
-        with col2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            run_button = st.button("Run Geocoding", type="primary", use_container_width=True)
-            st.markdown(f'<p class="big-caption">Will process {len(df)} addresses using PTV Developer + fallback geocoders</p>', unsafe_allow_html=True)
+        run_button = st.button("🚛 Run Geocoding", type="primary", use_container_width=True)
+        st.caption(f"Will process {len(df)} addresses using PTV Developer + fallback geocoders")
 
         if run_button:
             if not AZURE_MAPS_KEY and not PTV_KEY_AVAILABLE:
@@ -829,25 +762,15 @@ if uploaded_file:
 else:
     # No file uploaded — show single address test
     st.markdown("---")
+    st.subheader("🚛 Test Single Address")
 
-    col_test_img, col_test_input = st.columns([1, 5])
-    with col_test_img:
-        st.image("test_address_icon.png", width=140)
-    with col_test_input:
-        st.markdown('<p class="big-caption">Enter an address to test</p>', unsafe_allow_html=True)
-        test_address = st.text_input(
-            "Enter an address to test",
-            value="451 holland springs drive, maryville, tn",
-            help="Try any address worldwide — US, Peru, UK, Germany, etc.",
-            label_visibility="collapsed",
-        )
+    test_address = st.text_input(
+        "Enter an address to test",
+        value="451 holland springs drive, maryville, tn",
+        help="Try any address worldwide — US, Peru, UK, Germany, etc.",
+    )
 
-    col_geo_img, col_geo_btn = st.columns([1, 5])
-    with col_geo_img:
-        st.image("geocode_icon.png", width=140)
-    with col_geo_btn:
-        st.markdown("<br>", unsafe_allow_html=True)
-        geocode_clicked = st.button("Run Geocoding", type="primary", use_container_width=True)
+    geocode_clicked = st.button("Run Geocoding", type="primary")
 
     if geocode_clicked:
         with st.spinner("Geocoding..."):
