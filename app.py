@@ -16,6 +16,10 @@ from modules.column_detector import detect_columns, get_detection_summary, has_m
 from modules.address_decomposer import decompose_batch
 from modules.template import generate_template
 from config import AZURE_MAPS_KEY
+from ui.styles import get_brand_css
+from ui.components import render_header, render_card, render_metric_card, render_section_divider, get_confidence_color
+from ui.map_view import build_results_map_html
+import streamlit.components.v1 as _st_components
 
 # Check PTV key availability
 PTV_KEY_AVAILABLE = bool(os.environ.get("PTV_DEVELOPER_API_KEY", ""))
@@ -50,12 +54,11 @@ st.set_page_config(
 
 # ─── Header ────────────────────────────────────────────────────────────────────
 
-col_logo, col_title = st.columns([1, 3])
-with col_logo:
-    st.image("logo.png", width=200)
-with col_title:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### Clean Data. Smart Locations. Optimized Deliveries.")
+# Inject PTV brand CSS
+st.markdown(f"<style>{get_brand_css()}</style>", unsafe_allow_html=True)
+
+# PTV branded header (red/orange gradient)
+st.markdown(render_header(), unsafe_allow_html=True)
 
 # Check API key
 if not AZURE_MAPS_KEY:
@@ -631,6 +634,17 @@ if uploaded_file:
 
             # Determine default filter based on quick filter button clicks
             quick = st.session_state.get('quick_filter', 'all')
+
+            # ─── Map Visualization ─────────────────────────────────────────────
+            try:
+                map_html = build_results_map_html(results, height=500)
+                if map_html:
+                    st.markdown(render_section_divider(), unsafe_allow_html=True)
+                    st.subheader("🗺️ Map View")
+                    _st_components.html(map_html, height=520, scrolling=False)
+            except Exception as e:
+                st.warning(f"⚠️ Map visualization unavailable: {e}")
+
             if quick == 'high':
                 default_levels = ['High']
                 default_strategies = ['entrance_coords', 'building_coords', 'postal_code', 'review']
